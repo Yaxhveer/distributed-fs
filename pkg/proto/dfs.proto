@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package proto;
+
+// Add this line to specify the Go package for generated code
+option go_package = "./pkg/proto";
+
+service MasterService {
+    rpc UploadFile(FileUploadRequest) returns (Status);
+    rpc GetFile(FileGetRequest) returns (FileGetResponse);
+    rpc RegisterDataNode(DataNodeInfo) returns (Status);
+}
+
+service DataNodeService {
+    rpc StoreChunk(Chunk) returns (Status);
+    rpc RetrieveChunk(ChunkRequest) returns (Chunk);
+    rpc Heartbeat(DataNodeInfo) returns (Status);
+}
+
+message FileUploadRequest {
+    string filename = 1;
+    bytes data = 2;
+}
+
+message FileGetRequest {
+    string filename = 1;
+}
+
+message FileGetResponse {
+    string filename = 1;
+    bytes data = 2;
+}
+
+message DataNodeInfo {
+    string address = 1;
+}
+
+message Chunk {
+    string chunk_id = 1;
+    bytes data = 2;
+}
+
+message ChunkRequest {
+    string chunk_id = 1;
+}
+
+message Status {
+    string message = 1;
+    bool success = 2;
+}
