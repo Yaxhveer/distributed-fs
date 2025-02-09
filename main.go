@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/Yaxhveer/distributed-fs/pkg/datanode"
 	"github.com/Yaxhveer/distributed-fs/pkg/master"
@@ -18,6 +19,7 @@ func main() {
 	go master.InitialiseMasterNode(masterAddr)
 	go datanode.InitialiseDataNode(":8001")
 	
+	time.Sleep(1000*time.Millisecond)
 	conn, err := grpc.NewClient(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
     if err != nil {
         fmt.Printf("Failed to connect to DataNode: %s\n", err)

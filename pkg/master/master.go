@@ -25,19 +25,22 @@ const (
 
 type MasterNode struct {
 	pb.UnimplementedMasterServiceServer
-	dataNodes     [][]byte            // hash
-	dataNodesAddr map[string]string   // hash -> addr
-	metadata      map[string][]string // filename -> chunkIds
-	mutex         sync.Mutex
-	address       string
+	dataNodes []*node
+	metadata  map[string][]string
+	mutex     sync.Mutex
+	address   string
+}
+
+type node struct {
+	nodeId []byte
+	addr   string
 }
 
 func NewMasterNode(addr string) *MasterNode {
 	master := &MasterNode{
-		dataNodes:     make([][]byte, 0),
-		dataNodesAddr: make(map[string]string),
-		metadata:      make(map[string][]string),
-		address:       addr,
+		dataNodes: make([]*node, 0),
+		metadata:  make(map[string][]string),
+		address:   addr,
 	}
 	go master.heartbeatRoutine()
 	return master
@@ -65,12 +68,12 @@ func (m *MasterNode) heartbeatRoutine() {
 		time.Sleep(heartbeatInterval)
 		m.mutex.Lock()
 
-		activeNodes := [][]byte{}
-		for nodeID, address := range m.dataNodesAddr {
+		activeNodes := []*node{}
+		for _, node := range m.dataNodes {
+			address := node.addr
 			conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
 				log.Printf("Failed to connect to DataNode at %s: %v. Removing it.", address, err)
-				delete(m.dataNodesAddr, nodeID)
 				continue
 			}
 
@@ -82,10 +85,9 @@ func (m *MasterNode) heartbeatRoutine() {
 
 			if err != nil || !res.Success {
 				log.Printf("DataNode at %s is unresponsive. Removing it.", address)
-				delete(m.dataNodesAddr, nodeID)
 			} else {
 				log.Printf("DataNode %s is alive", address)
-				activeNodes = append(activeNodes, []byte(nodeID))
+				activeNodes = append(activeNodes, node)
 			}
 		}
 		m.dataNodes = activeNodes
@@ -98,14 +100,16 @@ func (m *MasterNode) RegisterDataNode(ctx context.Context, info *pb.DataNodeInfo
 	defer m.mutex.Unlock()
 
 	nodeID := generateHash([]byte(info.Address))
-	m.dataNodes = append(m.dataNodes, nodeID)
-	m.dataNodesAddr[string(nodeID)] = info.Address
+	node := node{
+		nodeId: nodeID,
+		addr:   info.Address,
+	}
+	m.dataNodes = append(m.dataNodes, &node)
 	m.sortNodes()
 	log.Printf("Registered Data Node at %s", info.Address)
 
 	return &pb.Status{Message: "Node Registered", Success: true}, nil
 }
-
 
 // Store file (split into chunks and distribute)
 func (m *MasterNode) UploadFile(ctx context.Context, req *pb.FileUploadRequest) (*pb.Status, error) {
@@ -141,10 +145,7 @@ func (m *MasterNode) UploadFile(ctx context.Context, req *pb.FileUploadRequest) 
 			go func(replicaIndex int) {
 				defer wg.Done()
 				currNodeIndex := (nodeIndex + replicaIndex) % len(m.dataNodes)
-				addr, exists := m.dataNodesAddr[string(m.dataNodes[currNodeIndex])]
-				if !exists {
-					return
-				}
+				addr := m.dataNodes[currNodeIndex].addr
 				err := sendChunkToDataNode(addr, string(chunkID), chunkData)
 				if err != nil {
 					log.Printf("Failed to upload chunk %s: %v", chunkID, err)
@@ -178,10 +179,7 @@ func (m *MasterNode) GetFile(ctx context.Context, req *pb.FileGetRequest) (*pb.F
 	var data []byte
 	for _, chunkID := range chunkIDs {
 		nodeIndex := m.FindSuccessor([]byte(chunkID))
-		addr, exists := m.dataNodesAddr[string(m.dataNodes[nodeIndex])]
-		if !exists {
-			return nil, fmt.Errorf("dataNode with file chunk does not exist")
-		}
+		addr := m.dataNodes[nodeIndex].addr
 		chunk, err := retrieveChunkFromDataNode(addr, chunkID)
 		if err != nil {
 			return nil, err
@@ -194,13 +192,13 @@ func (m *MasterNode) GetFile(ctx context.Context, req *pb.FileGetRequest) (*pb.F
 
 func (m *MasterNode) sortNodes() {
 	sort.Slice(m.dataNodes, func(i, j int) bool {
-		return bytes.Compare(m.dataNodes[i], m.dataNodes[j]) < 0
+		return bytes.Compare(m.dataNodes[i].nodeId, m.dataNodes[j].nodeId) < 0
 	})
 }
 
 func (m *MasterNode) FindSuccessor(key []byte) int {
-	for index, nodeID := range m.dataNodes {
-		if bytes.Compare(key, nodeID) <= 0 {
+	for index, node := range m.dataNodes {
+		if bytes.Compare(key, node.nodeId) <= 0 {
 			return index
 		}
 	}
@@ -209,7 +207,6 @@ func (m *MasterNode) FindSuccessor(key []byte) int {
 	}
 	return -1
 }
-
 
 func generateHash(key []byte) []byte {
 	h := sha1.New()
