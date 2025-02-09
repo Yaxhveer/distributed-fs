@@ -34,7 +34,7 @@ func InitialiseDataNode(addr string) {
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
-	log.Println("DataNode running on port:", addr)
+	log.Println("DataNode running on port", addr)
 	if err := server.Serve(listener); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}

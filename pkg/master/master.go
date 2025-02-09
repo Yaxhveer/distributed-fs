@@ -1,9 +1,9 @@
 package master
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net"
@@ -32,7 +32,7 @@ type MasterNode struct {
 }
 
 type node struct {
-	nodeId []byte
+	nodeId string
 	addr   string
 }
 
@@ -42,7 +42,6 @@ func NewMasterNode(addr string) *MasterNode {
 		metadata:  make(map[string][]string),
 		address:   addr,
 	}
-	go master.heartbeatRoutine()
 	return master
 }
 
@@ -55,14 +54,13 @@ func InitialiseMasterNode(addr string) {
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
-	log.Println("Master Node running on port:", addr)
+	log.Println("Master Node running on port", addr)
 
 	if err := server.Serve(listener); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}
 }
 
-// Heartbeat routine that pings DataNodes
 func (m *MasterNode) heartbeatRoutine() {
 	for {
 		time.Sleep(heartbeatInterval)
@@ -111,7 +109,6 @@ func (m *MasterNode) RegisterDataNode(ctx context.Context, info *pb.DataNodeInfo
 	return &pb.Status{Message: "Node Registered", Success: true}, nil
 }
 
-// Store file (split into chunks and distribute)
 func (m *MasterNode) UploadFile(ctx context.Context, req *pb.FileUploadRequest) (*pb.Status, error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -135,7 +132,7 @@ func (m *MasterNode) UploadFile(ctx context.Context, req *pb.FileUploadRequest) 
 
 		chunkData := fileData[start:end]
 		chunkID := generateHash(chunkData)
-		nodeIndex := m.FindSuccessor(chunkID)
+		nodeIndex := m.FindSuccessor([]byte(chunkID))
 
 		chunkIDs = append(chunkIDs, string(chunkID))
 
@@ -192,13 +189,15 @@ func (m *MasterNode) GetFile(ctx context.Context, req *pb.FileGetRequest) (*pb.F
 
 func (m *MasterNode) sortNodes() {
 	sort.Slice(m.dataNodes, func(i, j int) bool {
-		return bytes.Compare(m.dataNodes[i].nodeId, m.dataNodes[j].nodeId) < 0
+		return m.dataNodes[i].nodeId < m.dataNodes[j].nodeId
 	})
 }
 
 func (m *MasterNode) FindSuccessor(key []byte) int {
+	keyHex := hex.EncodeToString(key)
+
 	for index, node := range m.dataNodes {
-		if bytes.Compare(key, node.nodeId) <= 0 {
+		if keyHex <= node.nodeId {
 			return index
 		}
 	}
@@ -208,10 +207,10 @@ func (m *MasterNode) FindSuccessor(key []byte) int {
 	return -1
 }
 
-func generateHash(key []byte) []byte {
+func generateHash(key []byte) string {
 	h := sha1.New()
 	h.Write(key)
-	return h.Sum(nil)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func sendChunkToDataNode(address, chunkID string, chunkData []byte) error {
