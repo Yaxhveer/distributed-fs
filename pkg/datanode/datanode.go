@@ -64,3 +64,15 @@ func (dn *DataNode) Heartbeat(ctx context.Context, req *pb.DataNodeInfo) (*pb.St
 	log.Printf("Received heartbeat from Master for datanode %s\n", dn.address)
 	return &pb.Status{Message: "Alive", Success: true}, nil
 }
+
+func (dn *DataNode) ListChunks(ctx context.Context, req *pb.DataNodeInfo) (*pb.ChunkList, error) {
+	dn.mutex.RLock()
+	defer dn.mutex.RUnlock()
+
+	chunkIds := []string{}
+	for chunkId := range dn.storage {
+		chunkIds = append(chunkIds, chunkId)
+	}
+
+	return &pb.ChunkList{ChunkIds: chunkIds}, nil
+}

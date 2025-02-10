@@ -200,6 +200,7 @@ const (
 	DataNodeService_StoreChunk_FullMethodName    = "/proto.DataNodeService/StoreChunk"
 	DataNodeService_RetrieveChunk_FullMethodName = "/proto.DataNodeService/RetrieveChunk"
 	DataNodeService_Heartbeat_FullMethodName     = "/proto.DataNodeService/Heartbeat"
+	DataNodeService_ListChunks_FullMethodName    = "/proto.DataNodeService/ListChunks"
 )
 
 // DataNodeServiceClient is the client API for DataNodeService service.
@@ -209,6 +210,7 @@ type DataNodeServiceClient interface {
 	StoreChunk(ctx context.Context, in *Chunk, opts ...grpc.CallOption) (*Status, error)
 	RetrieveChunk(ctx context.Context, in *ChunkRequest, opts ...grpc.CallOption) (*Chunk, error)
 	Heartbeat(ctx context.Context, in *DataNodeInfo, opts ...grpc.CallOption) (*Status, error)
+	ListChunks(ctx context.Context, in *DataNodeInfo, opts ...grpc.CallOption) (*ChunkList, error)
 }
 
 type dataNodeServiceClient struct {
@@ -249,6 +251,16 @@ func (c *dataNodeServiceClient) Heartbeat(ctx context.Context, in *DataNodeInfo,
 	return out, nil
 }
 
+func (c *dataNodeServiceClient) ListChunks(ctx context.Context, in *DataNodeInfo, opts ...grpc.CallOption) (*ChunkList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ChunkList)
+	err := c.cc.Invoke(ctx, DataNodeService_ListChunks_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DataNodeServiceServer is the server API for DataNodeService service.
 // All implementations must embed UnimplementedDataNodeServiceServer
 // for forward compatibility.
@@ -256,6 +268,7 @@ type DataNodeServiceServer interface {
 	StoreChunk(context.Context, *Chunk) (*Status, error)
 	RetrieveChunk(context.Context, *ChunkRequest) (*Chunk, error)
 	Heartbeat(context.Context, *DataNodeInfo) (*Status, error)
+	ListChunks(context.Context, *DataNodeInfo) (*ChunkList, error)
 	mustEmbedUnimplementedDataNodeServiceServer()
 }
 
@@ -274,6 +287,9 @@ func (UnimplementedDataNodeServiceServer) RetrieveChunk(context.Context, *ChunkR
 }
 func (UnimplementedDataNodeServiceServer) Heartbeat(context.Context, *DataNodeInfo) (*Status, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Heartbeat not implemented")
+}
+func (UnimplementedDataNodeServiceServer) ListChunks(context.Context, *DataNodeInfo) (*ChunkList, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListChunks not implemented")
 }
 func (UnimplementedDataNodeServiceServer) mustEmbedUnimplementedDataNodeServiceServer() {}
 func (UnimplementedDataNodeServiceServer) testEmbeddedByValue()                         {}
@@ -350,6 +366,24 @@ func _DataNodeService_Heartbeat_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DataNodeService_ListChunks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DataNodeInfo)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DataNodeServiceServer).ListChunks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DataNodeService_ListChunks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DataNodeServiceServer).ListChunks(ctx, req.(*DataNodeInfo))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // DataNodeService_ServiceDesc is the grpc.ServiceDesc for DataNodeService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -368,6 +402,10 @@ var DataNodeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Heartbeat",
 			Handler:    _DataNodeService_Heartbeat_Handler,
+		},
+		{
+			MethodName: "ListChunks",
+			Handler:    _DataNodeService_ListChunks_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -15,6 +15,7 @@ service DataNodeService {
     rpc StoreChunk(Chunk) returns (Status);
     rpc RetrieveChunk(ChunkRequest) returns (Chunk);
     rpc Heartbeat(DataNodeInfo) returns (Status);
+    rpc ListChunks(DataNodeInfo) returns (ChunkList);
 }
 
 message FileUploadRequest {
@@ -47,4 +48,8 @@ message ChunkRequest {
 message Status {
     string message = 1;
     bool success = 2;
+}
+
+message ChunkList {
+    repeated string chunk_ids = 1;
 }

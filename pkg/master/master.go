@@ -20,7 +20,7 @@ const (
 	chunkSize         = 1024 * 1024 // 1MB chunks
 	replicationFactor = 3           // 3 replicas
 	heartbeatInterval = 10 * time.Second
-	heartbeatTimeout  = 5 * time.Second
+	maxRetry          = 3
 )
 
 type MasterNode struct {
@@ -42,6 +42,7 @@ func NewMasterNode(addr string) *MasterNode {
 		metadata:  make(map[string][]string),
 		address:   addr,
 	}
+	go master.heartbeatRoutine()
 	return master
 }
 
@@ -54,7 +55,7 @@ func InitialiseMasterNode(addr string) {
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
-	log.Println("Master Node running on port", addr)
+	log.Printf("Master Node running on port %s", addr)
 
 	if err := server.Serve(listener); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
@@ -64,30 +65,37 @@ func InitialiseMasterNode(addr string) {
 func (m *MasterNode) heartbeatRoutine() {
 	for {
 		time.Sleep(heartbeatInterval)
-		m.mutex.Lock()
 
 		activeNodes := []*node{}
 		for _, node := range m.dataNodes {
 			address := node.addr
-			conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
-			if err != nil {
-				log.Printf("Failed to connect to DataNode at %s: %v. Removing it.", address, err)
-				continue
-			}
 
-			client := pb.NewDataNodeServiceClient(conn)
-			ctx, cancel := context.WithTimeout(context.Background(), heartbeatTimeout)
-			res, err := client.Heartbeat(ctx, &pb.DataNodeInfo{Address: address})
-			cancel()
-			conn.Close()
+			err := retryWithBackoff(func() error {
+				conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+				if err != nil {
+					return fmt.Errorf("Failed to connect to DataNode: %v", err)
+				}
+				defer conn.Close()
 
-			if err != nil || !res.Success {
-				log.Printf("DataNode at %s is unresponsive. Removing it.", address)
-			} else {
+				client := pb.NewDataNodeServiceClient(conn)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				res, err := client.Heartbeat(ctx, &pb.DataNodeInfo{Address: address})
+				if err != nil || !res.Success {
+					return fmt.Errorf("Heartbeat failed for DataNode: %v", err)
+				}
+				return nil
+			})
+
+			if err == nil {
 				log.Printf("DataNode %s is alive", address)
 				activeNodes = append(activeNodes, node)
+			} else {
+				log.Printf("DataNode at %s is unresponsive. Removing it.", address)
 			}
 		}
+		m.mutex.Lock()
 		m.dataNodes = activeNodes
 		m.mutex.Unlock()
 	}
@@ -98,15 +106,97 @@ func (m *MasterNode) RegisterDataNode(ctx context.Context, info *pb.DataNodeInfo
 	defer m.mutex.Unlock()
 
 	nodeID := generateHash([]byte(info.Address))
-	node := node{
+
+	for _, existingNode := range m.dataNodes {
+		if existingNode.nodeId == nodeID {
+			log.Printf("Node %s is already registered.", info.Address)
+			return &pb.Status{Message: "Node Already Registered", Success: true}, nil
+		}
+	}
+
+	newNode := &node{
 		nodeId: nodeID,
 		addr:   info.Address,
 	}
-	m.dataNodes = append(m.dataNodes, &node)
+	m.dataNodes = append(m.dataNodes, newNode)
 	m.sortNodes()
-	log.Printf("Registered Data Node at %s", info.Address)
+	log.Printf("Registered Data Node at %s with ID %s", info.Address, nodeID)
+
+	successor := m.dataNodes[m.FindSuccessor([]byte(nodeID))]
+	go m.migrateChunks(successor, newNode)
 
 	return &pb.Status{Message: "Node Registered", Success: true}, nil
+}
+
+func (m *MasterNode) migrateChunks(fromNode *node, toNode *node) {
+	var resp *pb.ChunkList
+	err := retryWithBackoff(func() error {
+		conn, err := grpc.NewClient(fromNode.addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return fmt.Errorf("Failed to connect to DataNode %s: %v", fromNode.addr, err)
+		}
+		defer conn.Close()
+
+		client := pb.NewDataNodeServiceClient(conn)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		resp, err = client.ListChunks(ctx, &pb.DataNodeInfo{Address: fromNode.addr})
+		if err != nil {
+			return fmt.Errorf("Failed to get chunks from node %s: %v", fromNode.addr, err)
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("Failed to get chunk list from node %s: %v", fromNode.addr, err)
+		return
+	}
+
+	var wg sync.WaitGroup
+	for _, chunkID := range resp.ChunkIds {
+		if chunkID < toNode.nodeId {
+			wg.Add(1)
+			go func(chunkID string) {
+				defer wg.Done()
+				err := retryWithBackoff(func() error {
+					conn, err := grpc.NewClient(toNode.addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+					if err != nil {
+						return fmt.Errorf("Failed to connect to DataNode %s: %v", toNode.addr, err)
+					}
+					defer conn.Close()
+					client := pb.NewDataNodeServiceClient(conn)
+					err = m.transferChunk(client, chunkID, fromNode, toNode)
+					if err != nil {
+						return err
+					}
+					return nil
+				})
+				if err != nil {
+					log.Printf("Failed to connect: %v", err)
+				}
+			}(chunkID)
+		}
+	}
+
+	wg.Wait()
+	log.Printf("Finished migrating chunks from %s to %s", fromNode.addr, toNode.addr)
+}
+
+func (m *MasterNode) transferChunk(client pb.DataNodeServiceClient, chunkID string, fromNode *node, toNode *node) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	chunk, err := client.RetrieveChunk(ctx, &pb.ChunkRequest{ChunkId: chunkID})
+	if err != nil {
+		return fmt.Errorf("Failed to retrieve chunk %s from node %s: %v", chunkID, fromNode.addr, err)
+	}
+
+	err = sendChunkToDataNode(toNode.addr, chunkID, chunk.Data)
+	if err != nil {
+		return fmt.Errorf("Failed to store chunk %s on node %s: %v", chunkID, toNode.addr, err)
+	}
+	log.Printf("Migrated chunk %s from %s to %s", chunkID, fromNode.addr, toNode.addr)
+	return nil
 }
 
 func (m *MasterNode) UploadFile(ctx context.Context, req *pb.FileUploadRequest) (*pb.Status, error) {
@@ -158,7 +248,6 @@ func (m *MasterNode) UploadFile(ctx context.Context, req *pb.FileUploadRequest) 
 	return &pb.Status{Message: "File Uploaded", Success: true}, nil
 }
 
-// Retrieve file
 func (m *MasterNode) GetFile(ctx context.Context, req *pb.FileGetRequest) (*pb.FileGetResponse, error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -213,28 +302,55 @@ func generateHash(key []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func sendChunkToDataNode(address, chunkID string, chunkData []byte) error {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return fmt.Errorf("Failed to connect to DataNode: %v", err)
+func retryWithBackoff(operation func() error) error {
+	var lastErr error
+	for attempt := 1; attempt <= maxRetry; attempt++ {
+		lastErr = operation()
+		if lastErr == nil {
+			return nil
+		}
+		log.Printf("Attempt %d failed: %v", attempt, lastErr)
+		time.Sleep(time.Second * time.Duration(attempt))
 	}
-	defer conn.Close()
+	return lastErr
+}
 
-	client := pb.NewDataNodeServiceClient(conn)
-	status, err := client.StoreChunk(context.Background(), &pb.Chunk{ChunkId: chunkID, Data: chunkData})
-	if err != nil || !status.Success {
-		return fmt.Errorf("Failed to store chunk %s: %v", chunkID, err)
-	}
-	return nil
+func sendChunkToDataNode(address, chunkID string, chunkData []byte) error {
+	return retryWithBackoff(func() error {
+		conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return fmt.Errorf("Failed to connect to DataNode: %v", err)
+		}
+		defer conn.Close()
+
+		client := pb.NewDataNodeServiceClient(conn)
+		status, err := client.StoreChunk(context.Background(), &pb.Chunk{ChunkId: chunkID, Data: chunkData})
+		if err != nil || !status.Success {
+			return fmt.Errorf("Failed to store chunk %s: %v", chunkID, err)
+		}
+		log.Printf("Successfully stored chunk %s on DataNode %s", chunkID, address)
+		return nil
+	})
 }
 
 func retrieveChunkFromDataNode(address, chunkID string) (*pb.Chunk, error) {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, fmt.Errorf("Failed to connect to DataNode: %v", err)
-	}
-	defer conn.Close()
+	var chunk *pb.Chunk
+	err := retryWithBackoff(func() error {
+		conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return fmt.Errorf("Failed to connect to DataNode: %v", err)
+		}
+		defer conn.Close()
 
-	client := pb.NewDataNodeServiceClient(conn)
-	return client.RetrieveChunk(context.Background(), &pb.ChunkRequest{ChunkId: chunkID})
+		client := pb.NewDataNodeServiceClient(conn)
+		chunk, err = client.RetrieveChunk(context.Background(), &pb.ChunkRequest{ChunkId: chunkID})
+		if err != nil {
+			return fmt.Errorf("Failed to retrieve chunk %s: %v", chunkID, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return chunk, nil
 }
